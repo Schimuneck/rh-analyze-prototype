@@ -41,6 +41,18 @@ spec:
           value: "dummy-key-for-llamastack"
         - name: TELEMETRY_ENABLED
           value: "false"
+        - name: VECTOR_STORE_ID
+          valueFrom:
+            configMapKeyRef:
+              name: vectorstore-config
+              key: VECTOR_STORE_ID
+              optional: true
+        - name: GITHUB_MCP_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: github-mcp-token
+              key: token
+              optional: false
         volumeMounts:
         - name: cagent-data
           mountPath: /tmp
