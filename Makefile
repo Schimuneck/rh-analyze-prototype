@@ -1,4 +1,4 @@
-.PHONY: login logout whoami projects console help deploy deploy-vllm deploy-llamastack deploy-vectorstore deploy-agent build-agent build-vectorstore deploy-mlflow deploy-otel-collector deploy-kagenti deploy-kagenti-ui deploy-kagenti-wrapper label-namespace-kagenti clean status
+.PHONY: login logout whoami projects console help deploy deploy-vllm deploy-llamastack deploy-vectorstore deploy-agent build-agent build-vectorstore deploy-mlflow deploy-otel-collector deploy-kagenti deploy-kagenti-ui deploy-kagenti-wrapper label-namespace-kagenti build-mlflow-a2a-agent deploy-mlflow-a2a-agent clean status
 
 # Load environment variables from .env.local
 include .env.local
@@ -37,6 +37,10 @@ help:
 	@echo "  make deploy-kagenti-ui NAMESPACE=<name>          - Deploy kagenti-ui standalone (no auth)"
 	@echo "  make deploy-kagenti-wrapper NAMESPACE=<name>     - Deploy kagent→kagenti integration wrapper"
 	@echo "  make label-namespace-kagenti NAMESPACE=<name>    - Label namespace for kagenti discovery"
+	@echo ""
+	@echo "MLflow A2A Agent:"
+	@echo "  make build-mlflow-a2a-agent NAMESPACE=<name>     - Build MLflow A2A agent image"
+	@echo "  make deploy-mlflow-a2a-agent NAMESPACE=<name>    - Deploy MLflow A2A agent to kagenti"
 	@echo ""
 	@echo "Default namespace: $(NAMESPACE)"
 
@@ -447,6 +451,67 @@ deploy-kagenti-ui:
 	@echo ""
 	@echo "Note: Authentication is disabled in standalone mode."
 
+build-mlflow-a2a-agent:
+	@echo ""
+	@echo "Building MLflow A2A Agent image in namespace: $(NAMESPACE)"
+	@echo ""
+	@echo "→ Checking if namespace exists..."
+	@oc get namespace $(NAMESPACE) >/dev/null 2>&1 || \
+		(echo "  Namespace does not exist. Creating..." && \
+		 oc create namespace $(NAMESPACE) && \
+		 echo "  ✓ Namespace created")
+	@echo ""
+	@echo "→ Creating BuildConfig and ImageStream..."
+	@sed "s/NAMESPACE_PLACEHOLDER/$(NAMESPACE)/g" mlflow-a2a-agent/buildconfig.yaml | oc apply -f -
+	@echo "  ✓ BuildConfig created"
+	@echo ""
+	@echo "→ Starting image build..."
+	@cd mlflow-a2a-agent && oc start-build mlflow-a2a-agent -n $(NAMESPACE) --from-dir=. --follow
+	@echo ""
+	@echo "✓ MLflow A2A Agent image built successfully!"
+	@echo ""
+	@echo "Image: image-registry.openshift-image-registry.svc:5000/$(NAMESPACE)/mlflow-a2a-agent:latest"
+
+deploy-mlflow-a2a-agent:
+	@echo ""
+	@echo "Deploying MLflow A2A Agent to namespace: $(NAMESPACE)"
+	@echo ""
+	@echo "→ Checking if image exists..."
+	@oc get imagestream mlflow-a2a-agent -n $(NAMESPACE) >/dev/null 2>&1 || \
+		(echo "  Image not found. Building..." && $(MAKE) build-mlflow-a2a-agent NAMESPACE=$(NAMESPACE))
+	@echo ""
+	@echo "→ Labeling namespace for kagenti discovery..."
+	@oc label namespace $(NAMESPACE) kagenti-enabled=true --overwrite
+	@echo "  ✓ Namespace labeled"
+	@echo ""
+	@echo "→ Creating MCP tokens secret (if not exists)..."
+	@oc get secret mcp-tokens -n $(NAMESPACE) >/dev/null 2>&1 || \
+		(sed "s/NAMESPACE_PLACEHOLDER/$(NAMESPACE)/g" mlflow-a2a-agent/secret.yaml | oc apply -f - && \
+		 echo "  ⚠ Created secret with placeholder tokens. Update with real values!")
+	@echo ""
+	@echo "→ Deploying MLflow A2A Agent..."
+	@AGENT_IMAGE=$$(oc get imagestream mlflow-a2a-agent -n $(NAMESPACE) -o jsonpath='{.status.tags[0].items[0].dockerImageReference}'); \
+	sed "s/NAMESPACE_PLACEHOLDER/$(NAMESPACE)/g" mlflow-a2a-agent/deployment.yaml | \
+	sed "s|image-registry.openshift-image-registry.svc:5000/NAMESPACE_PLACEHOLDER/mlflow-a2a-agent:latest|$$AGENT_IMAGE|g" | \
+	oc apply -f -
+	@echo "  ✓ Agent deployed"
+	@echo ""
+	@echo "→ Waiting for agent to be ready..."
+	@timeout 180 bash -c 'until oc get pods -n $(NAMESPACE) -l app.kubernetes.io/name=mlflow-a2a-agent -o jsonpath="{.items[0].status.phase}" 2>/dev/null | grep -q "Running"; do echo "  Waiting for agent pod..."; sleep 5; done' || \
+		echo "  ⚠ Agent not ready yet. Check: oc logs -n $(NAMESPACE) -l app.kubernetes.io/name=mlflow-a2a-agent"
+	@echo ""
+	@echo "✓ MLflow A2A Agent deployed!"
+	@echo ""
+	@echo "The agent should now be discoverable in kagenti-ui."
+	@echo ""
+	@echo "Test A2A discovery:"
+	@echo "  oc port-forward -n $(NAMESPACE) svc/mlflow-a2a-agent 8080:8080"
+	@echo "  curl http://localhost:8080/.well-known/agent.json"
+	@echo ""
+	@echo "Test JSON-RPC:"
+	@echo "  curl -X POST http://localhost:8080/ -H 'Content-Type: application/json' \\"
+	@echo "    -d '{\"jsonrpc\":\"2.0\",\"method\":\"tasks/send\",\"params\":{\"message\":{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"Hello!\"}]}},\"id\":1}'"
+
 clean:
 	@echo "Removing deployments from namespace: $(NAMESPACE)"
 	@echo ""
@@ -507,6 +572,14 @@ clean:
 	@oc delete pvc mlflow-postgres-pvc -n $(NAMESPACE) 2>/dev/null || echo "  PostgreSQL PVC not found"
 	@oc delete secret mlflow-minio-secret -n $(NAMESPACE) 2>/dev/null || echo "  MinIO secret not found"
 	@oc delete secret mlflow-postgres-secret -n $(NAMESPACE) 2>/dev/null || echo "  PostgreSQL secret not found"
+	@echo ""
+	@echo "→ Removing MLflow A2A Agent..."
+	@oc delete agents.agent.kagenti.dev mlflow-a2a-agent -n $(NAMESPACE) 2>/dev/null || echo "  Agent CR not found"
+	@oc delete deployment mlflow-a2a-agent -n $(NAMESPACE) 2>/dev/null || echo "  Deployment not found"
+	@oc delete service mlflow-a2a-agent -n $(NAMESPACE) 2>/dev/null || echo "  Service not found"
+	@oc delete buildconfig mlflow-a2a-agent -n $(NAMESPACE) 2>/dev/null || echo "  BuildConfig not found"
+	@oc delete imagestream mlflow-a2a-agent -n $(NAMESPACE) 2>/dev/null || echo "  ImageStream not found"
+	@oc delete secret mcp-tokens -n $(NAMESPACE) 2>/dev/null || echo "  MCP tokens secret not found"
 	@echo ""
 	@echo "✓ Cleanup complete"
 	@echo ""
