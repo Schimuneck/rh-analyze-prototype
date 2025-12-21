@@ -444,6 +444,39 @@ kubectl logs -n kagenti-system -l app=kagenti-operator -f
 kubectl logs -n mcp-system -l app=mcp-gateway -f
 ```
 
+## Known Limitations: kagent.dev → kagenti Integration
+
+### Challenge
+
+Integrating `kagent.dev` agents with `kagenti-ui` is complex because:
+
+| Issue | Description |
+|-------|-------------|
+| **Different CRDs** | kagent uses `kagent.dev/v1alpha2`, kagenti uses `agent.kagenti.dev/v1alpha1` |
+| **Port Mismatch** | kagent runs on 8080, kagenti expects 8000 |
+| **AgentCard Dependency** | AgentCard requires Agent to be "Ready" |
+| **Pod Requirement** | agent.kagenti.dev needs its own running pods |
+
+### Attempted Solutions
+
+1. **Service alias (port 8000 → 8080)**: Works for connectivity, but AgentCard won't sync without a Ready Agent
+2. **Wrapper with replicas: 0**: Agent never becomes Ready, AgentCard won't sync
+3. **Wrapper with replicas: 1**: Creates duplicate pods, kagent image needs specific volume mounts
+
+### Recommended Approach
+
+**For kagent.dev agents**: Use **kagent-ui** (native support)
+```
+https://kagent-ui-kagent.apps.rosa.<cluster>/
+```
+
+**For kagenti orchestration**: Use **MLflow ResponsesAgent** with A2A wrapper
+- Build a custom container with A2A endpoints
+- Deploy as `agent.kagenti.dev` resource
+- Full kagenti integration without conflicts
+
+See: `../STRATEGY-COMPARISON-KAGENT-VS-MLFLOW-RESPONSESAGENT.md` for details.
+
 ## Related Documentation
 
 - [Kagenti GitHub](https://github.com/kagenti/kagenti)
