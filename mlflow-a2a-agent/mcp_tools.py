@@ -13,7 +13,7 @@ from functools import partial
 
 import httpx
 from llama_stack_client.lib.agents.client_tool import ClientTool, client_tool
-from llama_stack_client.lib.agents.types import CompletionMessage, ToolResponse
+from typing import List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -131,98 +131,32 @@ def call_mcp_tool(
         return f"Error calling tool: {e}"
 
 
-class MCPClientTool(ClientTool):
+def create_mcp_tool_function(server_config: Dict[str, Any], tool_def: Dict[str, Any]):
     """
-    A ClientTool that wraps an MCP tool.
+    Create a Python function that wraps an MCP tool call.
+    This function will be decorated with @client_tool to make it usable by the Agent.
     """
+    tool_name = tool_def.get("name", "")
     
-    def __init__(
-        self,
-        server_config: Dict[str, Any],
-        tool_definition: Dict[str, Any]
-    ):
-        self.server_config = server_config
-        self.tool_definition = tool_definition
-        self._name = f"{server_config['name']}_{tool_definition['name']}"
-        self._description = tool_definition.get("description", "")
-        self._parameters = tool_definition.get("inputSchema", {})
+    def mcp_tool_function(**kwargs) -> str:
+        """Dynamically created MCP tool function."""
+        result = call_mcp_tool(server_config, tool_name, kwargs)
+        return str(result)
     
-    def get_name(self) -> str:
-        return self._name
+    # Set function metadata for the ClientTool decorator
+    mcp_tool_function.__name__ = f"{server_config['name']}_{tool_name}"
+    mcp_tool_function.__doc__ = tool_def.get("description", "MCP tool")
     
-    def get_description(self) -> str:
-        return self._description
-    
-    def get_params_definition(self) -> Dict[str, Any]:
-        return self._parameters
-    
-    def get_tool_definition(self) -> Dict[str, Any]:
-        """Return tool definition in OpenAI function format."""
-        return {
-            "type": "function",
-            "function": {
-                "name": self._name,
-                "description": self._description,
-                "parameters": self._parameters
-            }
-        }
-    
-    def run(self, messages: List[CompletionMessage]) -> ToolResponse:
-        """Execute the MCP tool call."""
-        # Extract arguments from the last message's tool call
-        if not messages:
-            return ToolResponse(
-                call_id="unknown",
-                tool_name=self._name,
-                content="No messages provided",
-                metadata={}
-            )
-        
-        last_message = messages[-1]
-        if not last_message.tool_calls:
-            return ToolResponse(
-                call_id="unknown",
-                tool_name=self._name,
-                content="No tool calls in message",
-                metadata={}
-            )
-        
-        tool_call = last_message.tool_calls[0]
-        
-        # Parse arguments
-        arguments = tool_call.arguments
-        if isinstance(arguments, str):
-            try:
-                arguments = json.loads(arguments)
-            except json.JSONDecodeError:
-                arguments = {}
-        
-        # Call the actual MCP tool
-        result = call_mcp_tool(
-            self.server_config,
-            self.tool_definition["name"],
-            arguments
-        )
-        
-        return ToolResponse(
-            call_id=tool_call.call_id,
-            tool_name=self._name,
-            content=result,
-            metadata={"mcp_server": self.server_config["name"]}
-        )
-    
-    async def async_run(self, messages: List[CompletionMessage]) -> ToolResponse:
-        """Async version - just calls sync for now."""
-        return self.run(messages)
+    return mcp_tool_function
 
 
-def create_mcp_client_tools() -> List[ClientTool]:
+def create_mcp_client_tools() -> List[Any]:
     """
     Create ClientTools for each MCP server/tool combination.
     
-    Returns a list of ClientTool instances that can be passed to the Agent.
+    Returns a list of tool functions that can be passed to the Agent.
     """
-    tools: List[ClientTool] = []
+    tools: List[Any] = []
     
     for server_config in load_mcp_config():
         server_name = server_config.get("name", "unknown")
@@ -241,10 +175,11 @@ def create_mcp_client_tools() -> List[ClientTool]:
                 logger.debug(f"Skipping tool {tool_name} (not in whitelist)")
                 continue
             
-            # Create ClientTool wrapper
-            client_tool = MCPClientTool(server_config, tool_def)
-            tools.append(client_tool)
-            logger.info(f"Registered tool: {client_tool.get_name()}")
+            # Create tool function and decorate it
+            tool_func = create_mcp_tool_function(server_config, tool_def)
+            decorated_tool = client_tool(tool_func)
+            tools.append(decorated_tool)
+            logger.info(f"Registered tool: {tool_func.__name__}")
     
     logger.info(f"Total MCP tools registered: {len(tools)}")
     return tools
