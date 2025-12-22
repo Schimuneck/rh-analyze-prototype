@@ -35,6 +35,8 @@ spec:
               mc mb myminio/mlflow --ignore-existing
               echo "MLflow bucket ready"
           env:
+            - name: HOME
+              value: /tmp
             - name: MINIO_ROOT_USER
               valueFrom:
                 secretKeyRef:
@@ -71,12 +73,12 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: mlflow-postgres-secret
-                  key: POSTGRES_USER
+                  key: POSTGRESQL_USER
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: mlflow-postgres-secret
-                  key: POSTGRES_PASSWORD
+                  key: POSTGRESQL_PASSWORD
             # S3/MinIO configuration
             - name: MLFLOW_S3_ENDPOINT_URL
               value: http://mlflow-minio:9000
